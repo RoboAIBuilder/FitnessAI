@@ -1,0 +1,10 @@
+node_modules/
+web/dist/
+web/dist-demo/
+web/dist-api/
+api/.venv/
+__pycache__/
+*.pyc
+*.db
+.env
+.pytest_cache/

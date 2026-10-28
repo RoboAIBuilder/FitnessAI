@@ -1,0 +1,62 @@
+# Render blueprint: the Python API plus the hourly scheduling job.
+# Web app (web/) deploys separately on Vercel with VITE_API_URL pointing at the API.
+services:
+  - type: web
+    name: fitnessai-api
+    runtime: python
+    rootDir: api
+    buildCommand: pip install -r requirements.txt
+    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: AUTH_MODE
+        value: supabase
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_SUBJECT
+        value: mailto:coach@example.com
+      - key: CORS_ORIGINS
+        sync: false
+      - key: TRAINER_TZ
+        value: America/New_York
+      - key: SEED_DEMO
+        value: "0"
+  - type: cron
+    name: fitnessai-hourly
+    runtime: python
+    rootDir: api
+    schedule: "0 * * * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.jobs
+    envVars:
+      - key: DATABASE_URL
+        fromService:
+          type: web
+          name: fitnessai-api
+          envVarKey: DATABASE_URL
+      - key: VAPID_PUBLIC_KEY
+        fromService:
+          type: web
+          name: fitnessai-api
+          envVarKey: VAPID_PUBLIC_KEY
+      - key: VAPID_PRIVATE_KEY
+        fromService:
+          type: web
+          name: fitnessai-api
+          envVarKey: VAPID_PRIVATE_KEY
+      - key: VAPID_SUBJECT
+        fromService:
+          type: web
+          name: fitnessai-api
+          envVarKey: VAPID_SUBJECT
+      - key: TRAINER_TZ
+        fromService:
+          type: web
+          name: fitnessai-api
+          envVarKey: TRAINER_TZ
