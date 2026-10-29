@@ -3,7 +3,7 @@ import os
 import tempfile
 
 _db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-os.environ["DATABASE_URL"] = f"sqlite:///{_db.name}"
+os.environ.setdefault("DATABASE_URL", f"sqlite:///{_db.name}")
 os.environ["AUTH_MODE"] = "dev"
 os.environ["SEED_DEMO"] = "1"
 
@@ -29,9 +29,10 @@ def test_state_and_balance():
 
 def test_add_package_and_log_session():
     with client() as c:
+        before = sum(p["sessions"] for p in next(x for x in c.get("/api/state").json()["clients"] if x["id"] == "c-elena")["packages"])
         st = c.post("/api/clients/c-elena/packages", json={"sessions": 10, "price": 600}).json()
         elena = next(x for x in st["clients"] if x["id"] == "c-elena")
-        assert sum(p["sessions"] for p in elena["packages"]) >= 20
+        assert sum(p["sessions"] for p in elena["packages"]) == before + 10
         log = next(l for l in st["logs"] if l["clientId"] == "c-elena" and l["status"] == "done")
         new = {**log, "id": "l_test", "date": "2026-10-27T22:00:00Z", "note": "api test"}
         st2 = c.post("/api/sessions", json={"log": new}).json()

@@ -4,6 +4,10 @@ Every write returns the caller's full, fresh state (it's small: one trainer's cl
 has to stitch partial updates together. Clients get a filtered view of only their own data.
 
 Run locally:  uvicorn app.main:app --reload
+
+Event-driven: every change (a client picks a time, the trainer blocks time, a package is renewed…)
+is handled in the request that makes it. Nothing runs on a timer; "Plan & remind now" plans the next
+days and sends reminders when the trainer taps it. See docs/EVENTS.md.
 """
 from __future__ import annotations
 
@@ -16,7 +20,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from .auth import Principal, can_act_for_client, current_principal, trainer_only
+from .auth import Principal, can_act_for_client, current_principal, sign_in, trainer_only
+from .engine import events
+from .engine.balance import session_balance
 from .config import config
 from .engine.dates import add_days, start_of_week, utcnow
 from .engine.exercises import EQUIPMENT_LABELS, EXERCISES
@@ -34,18 +40,18 @@ from .schemas import (
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    repo.create_tables()
-    if config.seed_demo:
-        from .seed import build_seed
-
-        with Session(repo.engine) as s:
-            if s.exec(select(Trainer)).first() is None:
-                repo.seed_trainer(s, build_seed(utcnow(), config.default_timezone))
+    # Tables and demo data are created on first request (repo.ensure_ready), which also works on Vercel.
     yield
 
 
 app = FastAPI(title="FitnessAI API", version="0.2.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=config.cors_origins, allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.cors_origins,
+    allow_origin_regex=config.cors_origin_regex or None,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ---------- helpers ----------
@@ -89,6 +95,18 @@ def booking_of(state: State, booking_id: str) -> Booking:
     return b
 
 
+def unbooked_left(state: State, client_id: str) -> int:
+    c = client_of(state, client_id)
+    b = session_balance(c, state.logs, state.bookings, utcnow())
+    return b.pending - b.booked if b.has_packages else 1  # no packages recorded: don't hold bookings
+
+
+def save_outcome(session: Session, p: Principal, out: "events.Outcome") -> list[Message]:
+    repo.save_bookings(session, p.trainer_id, out.bookings)
+    repo.save_messages(session, p.trainer_id, out.messages)
+    return out.messages
+
+
 def commit_and_deliver(session: Session, messages: list[Message]) -> None:
     session.commit()
     if messages:
@@ -98,7 +116,30 @@ def commit_and_deliver(session: Session, messages: list[Message]) -> None:
 # ---------- read ----------
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    """Setup check, like Lost_Found's: lists anything still to configure."""
+    problems = []
+    if config.database_url.startswith("sqlite") and config.on_vercel:
+        problems.append("Connect a Postgres database (project Storage tab → Neon). It sets DATABASE_URL.")
+    if config.auth_mode == "code" and config.on_vercel and not config.trainer_code:
+        problems.append("Set TRAINER_CODE (the trainer's sign-in code).")
+    if config.auth_mode == "dev" and config.on_vercel:
+        problems.append("AUTH_MODE=dev turns off sign-in. Remove it.")
+    return {"ok": not problems, "database": "postgres" if config.database_url.startswith("postgresql") else "sqlite", "problems": problems}
+
+
+class LoginIn(BaseModel):
+    code: str
+
+
+@app.post("/api/auth/login")
+def login(body: LoginIn, session: Session = Depends(repo.get_session)):
+    """Trainer or client signs in with their code."""
+    return sign_in(session, body.code)
+
+
+@app.get("/api/auth/mode")
+def auth_mode():
+    return {"mode": config.auth_mode}
 
 
 @app.get("/api/exercises")
@@ -176,7 +217,10 @@ def add_package(client_id: str, body: PackageIn, p: Principal = Depends(trainer_
     c = client_of(load(session, p), client_id)
     c.packages.append(SessionPackage(id=uid("pk"), date=utcnow(), sessions=body.sessions, price=body.price, note=body.note or f"{body.sessions}-session pack"))
     repo.save_client(session, p.trainer_id, c)
-    session.commit()
+    # Event: package renewed → confirm sessions that were held because the client had none left
+    state = load(session, p)
+    out = events.renewed(repo.sched_of(state), client_id, unbooked_left(state, client_id), utcnow())
+    commit_and_deliver(session, save_outcome(session, p, out))
     return view(session, p)
 
 
@@ -287,7 +331,11 @@ def log_session(body: SessionIn, p: Principal = Depends(trainer_only), session: 
         if b:
             b.status = "done"
             repo.save_bookings(session, p.trainer_id, [b])
-    session.commit()
+    # Event: session logged → tell the client when they're running low on sessions
+    bal = session_balance(c, [*state.logs, body.log], state.bookings, utcnow())
+    notes = events.low_balance_notice(c, bal.pending, utcnow()) if bal.has_packages else []
+    repo.save_messages(session, p.trainer_id, notes)
+    commit_and_deliver(session, notes)
     return view(session, p)
 
 
@@ -364,15 +412,34 @@ class BookIn(BaseModel):
 
 @app.post("/api/clients/{client_id}/book")
 def book(client_id: str, body: BookIn, p: Principal = Depends(current_principal), session: Session = Depends(repo.get_session)):
+    """Event: client picks a time — new booking, accepting an offer, or changing a confirmed session."""
     can_act_for_client(p, client_id)
     state = load(session, p)
     client_of(state, client_id)
-    r = accept_time(repo.sched_of(state), client_id, body.start, utcnow(), body.bookingId)
+    r = events.client_books(repo.sched_of(state), client_id, body.start, utcnow(), body.bookingId, unbooked_left(state, client_id), by_client=p.role == "client")
     if not r.ok:
         raise HTTPException(409, r.reason)
-    repo.save_bookings(session, p.trainer_id, [r.booking])
-    repo.save_messages(session, p.trainer_id, r.messages)
-    commit_and_deliver(session, r.messages)
+    repo.save_bookings(session, p.trainer_id, [r.result.booking])
+    repo.save_messages(session, p.trainer_id, r.result.messages)
+    commit_and_deliver(session, [*r.result.messages, *save_outcome(session, p, r.extra)])
+    return view(session, p)
+
+
+class UsualIn(BaseModel):
+    dow: int
+    time: str
+
+
+@app.post("/api/clients/{client_id}/usual-slot")
+def set_usual(client_id: str, body: UsualIn, p: Principal = Depends(current_principal), session: Session = Depends(repo.get_session)):
+    """Event: client makes a time their usual weekly slot (used the next time the trainer plans)."""
+    can_act_for_client(p, client_id)
+    from .schemas import UsualSlot
+
+    c = client_of(load(session, p), client_id)
+    c.usual_slots = [u for u in c.usual_slots if u.dow != body.dow] + [UsualSlot(dow=body.dow, time=body.time)]
+    repo.save_client(session, p.trainer_id, c)
+    session.commit()
     return view(session, p)
 
 
@@ -422,21 +489,46 @@ def trainer_skip(booking_id: str, p: Principal = Depends(trainer_only), session:
 
 @app.post("/api/bookings/{booking_id}/cancel")
 def cancel(booking_id: str, p: Principal = Depends(current_principal), session: Session = Depends(repo.get_session)):
+    """Event: a session is cancelled (by the trainer, or by the client — late if inside the notice window)."""
     state = load(session, p)
     b = booking_of(state, booking_id)
     can_act_for_client(p, b.client_id)
-    tz = repo.sched_of(state).tz
-    msgs: list[Message] = []
-    c = next((x for x in state.clients if x.id == b.client_id), None)
-    if c and p.role == "trainer":
-        msgs.append(msg(c, f"Your session on {fmt_day(b.start, tz)} at {fmt_time(b.start, tz)} is cancelled.", utcnow(), booking_id=b.id))
-    b.status = "cancelled"
-    state.bookings = [x for x in state.bookings if x.id != b.id] + [b]
-    wb, wm = offer_to_waitlist(repo.sched_of(state), b.start, utcnow())
-    repo.save_bookings(session, p.trainer_id, [b, *([wb] if wb else [])])
-    repo.save_messages(session, p.trainer_id, [*msgs, *wm])
-    commit_and_deliver(session, [*msgs, *wm])
+    out = events.client_cancels(repo.sched_of(state), b, utcnow(), by_client=p.role == "client")
+    commit_and_deliver(session, save_outcome(session, p, out))
     return view(session, p)
+
+
+class BlockIn(BaseModel):
+    start: datetime
+    end: datetime
+    label: str = "Unavailable"
+
+
+@app.post("/api/busy")
+def block(body: BlockIn, p: Principal = Depends(trainer_only), session: Session = Depends(repo.get_session)):
+    """Event: trainer makes himself unavailable. Clients already booked in that time are moved right away."""
+    if body.end <= body.start:
+        raise HTTPException(400, "End time must be after start time")
+    state = load(session, p)
+    blk, out = events.block_time(repo.sched_of(state), body.start, body.end, body.label, utcnow())
+    repo.save_busy(session, p.trainer_id, [blk])
+    commit_and_deliver(session, save_outcome(session, p, out))
+    return {"summary": out.summary, "state": view(session, p)}
+
+
+@app.delete("/api/busy/{block_id}")
+def unblock(block_id: str, p: Principal = Depends(trainer_only), session: Session = Depends(repo.get_session)):
+    """Event: trainer removes time he blocked. The time opens up and the waitlist is offered the first slot."""
+    from .models import BusyBlockRow
+
+    state = load(session, p)
+    blk = next((x for x in state.busy if x.id == block_id), None)
+    if not blk or blk.source != "Manual":
+        raise HTTPException(404, "Only time you blocked in FitnessAI can be removed here")
+    session.delete(session.get(BusyBlockRow, block_id))
+    out = events.unblock_time(repo.sched_of(state), blk, utcnow())
+    commit_and_deliver(session, save_outcome(session, p, out))
+    return {"summary": out.summary, "state": view(session, p)}
 
 
 class OfferSlotIn(BaseModel):
@@ -467,8 +559,12 @@ def put_settings(body: Settings, p: Principal = Depends(trainer_only), session: 
 
 @app.put("/api/availability")
 def put_availability(body: dict[int, list[Window]], p: Principal = Depends(trainer_only), session: Session = Depends(repo.get_session)):
+    """Event: trainer changes weekly hours. Sessions that fall outside the new hours are moved right away."""
     repo.save_trainer_settings(session, p.trainer_id, availability=body)
-    session.commit()
+    session.flush()
+    state = load(session, p)
+    out = events.resolve_conflicts(repo.sched_of(state), utcnow())
+    commit_and_deliver(session, save_outcome(session, p, out))
     return view(session, p)
 
 

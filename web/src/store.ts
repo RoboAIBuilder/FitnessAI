@@ -8,9 +8,10 @@ import { apiMode } from './api';
 import { EX, exName } from './data/exercises';
 import { applyMods } from './engine/generator';
 import { lastLoads, nextDay, planNextWeek } from './engine/planner';
-import { acceptTime, autoPlan, declineTime, dueReminders, msg, nearestSlots, offerToWaitlist, openSlots, type SchedState } from './engine/scheduler';
+import { autoPlan, declineTime, dueReminders, msg, nearestSlots, openSlots, type SchedState } from './engine/scheduler';
 import { addDays, fmtDay, fmtTime, sameDay, startOfDay, startOfWeek, uid } from './lib/dates';
 import { sessionBalance } from './lib/balance';
+import * as ev from './engine/events';
 
 // Storage that never throws (private mode, blocked storage, sandboxed previews)
 const memory = new Map<string, string>();
@@ -100,7 +101,11 @@ interface Actions {
   trainerOffer: (bookingId: string, startISO: string) => void;
   trainerSkip: (bookingId: string) => void;
   offerOpenSlot: (clientId: string, startISO: string) => void;
-  cancelBooking: (bookingId: string) => void;
+  cancelBooking: (bookingId: string, byClient?: boolean) => void;
+  blockTime: (startISO: string, endISO: string, label: string) => Promise<string>;
+  unblockTime: (blockId: string) => Promise<string>;
+  setUsualSlot: (clientId: string, dow: number, time: string) => void;
+  signOut: () => void;
   simulateReplies: () => Promise<number>;
   sendReminders: () => number;
   setAvailability: (a: Availability) => void;
@@ -179,7 +184,13 @@ export function stepInfo(a: ActiveSession) {
 
 export const useStore = create<AppState>()(
   persist(
-    (set, get) => ({
+    (set, get) => {
+      const applyOutcome = (out: ev.Outcome) =>
+        set((st) => {
+          const ids = new Set(out.bookings.map((b) => b.id));
+          return { bookings: [...st.bookings.filter((b) => !ids.has(b.id)), ...out.bookings], messages: [...st.messages, ...out.messages] };
+        });
+      return {
       ...(apiMode ? emptyData() : seedData()),
       toasts: [],
 
@@ -215,6 +226,9 @@ export const useStore = create<AppState>()(
           )
         }));
         const b = sessionBalance(get(), clientId);
+        // Event: renewal confirms bookings held for lack of sessions
+        const out = ev.renewed(sched(get()), clientId, b.pending - b.booked);
+        if (out.bookings.length) applyOutcome(out);
         get().toast(`Added ${sessions} sessions · ${b.owes ? `still owes ${b.owes}` : `${b.pending} pending`}`);
       },
       removePackage: (clientId, packageId) =>
@@ -339,6 +353,8 @@ export const useStore = create<AppState>()(
           bookings: s.bookings.map((b) => (b.id === a.bookingId ? { ...b, status: 'done' } : b))
         });
         const bal = sessionBalance(get(), a.clientId);
+        const who = get().clients.find((c) => c.id === a.clientId);
+        if (bal.hasPackages && who) set((st) => ({ messages: [...st.messages, ...ev.lowBalanceNotice(who, bal.pending)] }));
         get().toast(!bal.hasPackages ? 'Session logged' : bal.owes ? `Session logged · owes ${bal.owes}` : `Session logged · ${bal.pending} left`);
         return log.id;
       },
@@ -395,10 +411,11 @@ export const useStore = create<AppState>()(
       },
       clientAccept: async (clientId, startISO, bookingId) => {
         const s = get();
-        const r = acceptTime(sched(s), clientId, startISO, new Date(), bookingId);
+        const bal = sessionBalance(s, clientId);
+        const r = ev.clientBooks(sched(s), clientId, startISO, new Date(), bookingId, bal.hasPackages ? bal.pending - bal.booked : 1, s.role === 'client');
         if (!r.ok) return { ok: false, reason: r.reason };
         const bookings = r.replaced ? s.bookings.map((b) => (b.id === r.replaced ? r.booking : b)) : [...s.bookings, r.booking];
-        set({ bookings, messages: [...s.messages, ...r.messages] });
+        set({ bookings: [...bookings, ...r.extra.bookings], messages: [...s.messages, ...r.messages, ...r.extra.messages] });
         return { ok: true };
       },
       clientDecline: (bookingId, text) => {
@@ -438,19 +455,32 @@ export const useStore = create<AppState>()(
         set({ bookings: [...s.bookings, b], messages: [...s.messages, m] });
         get().toast(`Offered to ${c.name.split(' ')[0]}`);
       },
-      cancelBooking: (bookingId) => {
+      cancelBooking: (bookingId, byClient = false) => {
         const s = get();
         const b = s.bookings.find((x) => x.id === bookingId);
         if (!b) return;
-        const c = s.clients.find((x) => x.id === b.clientId);
-        const msgs: Message[] = c ? [msg(c, `Your session on ${fmtDay(b.start)} at ${fmtTime(b.start)} is cancelled.`, new Date(), { bookingId })] : [];
-        const w = offerToWaitlist(sched(s), new Date(b.start), new Date());
-        set({
-          bookings: [...s.bookings.map((x) => (x.id === bookingId ? { ...x, status: 'cancelled' as const } : x)), ...(w.booking ? [w.booking] : [])],
-          messages: [...s.messages, ...msgs, ...w.messages]
-        });
-        get().toast(w.booking ? 'Cancelled · slot offered to waitlist' : 'Cancelled');
+        const out = ev.cancelSession(sched(s), b, new Date(), byClient);
+        applyOutcome(out);
+        get().toast(out.summary);
       },
+      blockTime: async (startISO, endISO, label) => {
+        const r = ev.blockTime(sched(get()), new Date(startISO), new Date(endISO), label);
+        set((st) => ({ busy: [...st.busy, r.block] }));
+        applyOutcome(r.out);
+        return r.out.summary;
+      },
+      unblockTime: async (blockId) => {
+        const s = get();
+        const blk = s.busy.find((x) => x.id === blockId);
+        if (!blk) return 'Not found';
+        const out = ev.unblockTime(sched(s), blk);
+        set({ busy: s.busy.filter((x) => x.id !== blockId) });
+        applyOutcome(out);
+        return out.summary;
+      },
+      setUsualSlot: (clientId, dow, time) =>
+        set((s) => ({ clients: s.clients.map((c) => (c.id === clientId ? { ...c, usualSlots: [...c.usualSlots.filter((u) => u.dow !== dow), { dow, time }] } : c)) })),
+      signOut: () => {},
       simulateReplies: async () => {
         const s = get();
         let n = 0;
@@ -479,7 +509,14 @@ export const useStore = create<AppState>()(
         set({ messages: [...s.messages, ...msgs], reminded: [...s.reminded, ...due.map((b) => b.id)] });
         return msgs.length;
       },
-      setAvailability: (a) => set({ availability: a }),
+      setAvailability: (a) => {
+        set({ availability: a });
+        const out = ev.resolveConflicts(sched(get()));
+        if (out.bookings.length) {
+          applyOutcome(out);
+          get().toast(out.summary);
+        }
+      },
       setAutomation: (patch) => set((s) => ({ settings: { ...s.settings, automation: { ...s.settings.automation, ...patch } } })),
       setSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
       setPush: (clientId, enabled) => set((s) => ({ clients: s.clients.map((c) => (c.id === clientId ? { ...c, pushEnabled: enabled, contact: enabled ? 'push' : 'app' } : c)) })),
@@ -488,7 +525,8 @@ export const useStore = create<AppState>()(
         const m: Message = { id: uid('m'), clientId, at: new Date().toISOString(), dir: 'in', channel: 'app', body };
         set({ messages: [...s.messages, m] });
       }
-    }),
+    };
+    },
     {
       name: apiMode ? 'fitnessai-live-v1' : 'fitnessai-v1',
       version: 2,

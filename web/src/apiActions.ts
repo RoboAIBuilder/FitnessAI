@@ -1,6 +1,6 @@
 // When connected to the Python API, these replace the store's on-device actions.
 // Each call returns the caller's fresh state from the server, which replaces local data.
-import { api, ApiError, apiMode } from './api';
+import { api, ApiError, apiMode, signOut as clearToken } from './api';
 import { buildLog, useStore, type AppState } from './store';
 import { sessionBalance } from './lib/balance';
 
@@ -99,7 +99,32 @@ export function installApiActions() {
     },
     trainerSkip: (bookingId) => void call('POST', `/api/bookings/${bookingId}/skip`, undefined, () => 'Session skipped and client told'),
     offerOpenSlot: (clientId, startISO) => void call('POST', '/api/slots/offer', { clientId, start: startISO }, (s) => `Offered to ${first(s, clientId)}`),
-    cancelBooking: (bookingId) => void call('POST', `/api/bookings/${bookingId}/cancel`, undefined, () => 'Cancelled'),
+    cancelBooking: (bookingId) => void call('POST', `/api/bookings/${bookingId}/cancel`, undefined, (s) => (s.bookings.find((b) => b.id === bookingId)?.note ?? 'Cancelled')),
+    blockTime: async (startISO, endISO, label) => {
+      try {
+        const r = await api<{ summary: string; state: Snapshot }>('POST', '/api/busy', { start: startISO, end: endISO, label });
+        apply(r.state);
+        return r.summary;
+      } catch (e) {
+        fail(e);
+        return '';
+      }
+    },
+    unblockTime: async (blockId) => {
+      try {
+        const r = await api<{ summary: string; state: Snapshot }>('DELETE', `/api/busy/${blockId}`);
+        apply(r.state);
+        return r.summary;
+      } catch (e) {
+        fail(e);
+        return '';
+      }
+    },
+    setUsualSlot: (clientId, dow, time) => void call('POST', `/api/clients/${clientId}/usual-slot`, { dow, time }),
+    signOut: () => {
+      clearToken();
+      useStore.setState({ authNeeded: true, loaded: true, toasts: [], clients: [], bookings: [], messages: [], logs: [], programs: [], plans: {}, role: undefined, me: null });
+    },
     simulateReplies: async () => {
       try {
         const r = await api<{ count: number; state: Snapshot }>('POST', '/api/demo/simulate-replies');

@@ -28,7 +28,13 @@ export default function Booking() {
     return i >= 0 ? i : 0;
   });
   const day = days[dayIdx] ?? days[0];
-  const slots = useMemo(() => (day ? slotsFor(s, day, pending?.id) : []), [s, day, pending?.id]);
+  // Times already offered to this client are held for them, so add them to the open times for that day.
+  const slots = useMemo(() => {
+    if (!day) return [];
+    const open = slotsFor(s, day, pending?.id);
+    const held = (pending?.offered ?? []).map((o) => new Date(o)).filter((t) => sameDay(t, day) && !open.some((x) => x.getTime() === t.getTime()));
+    return [...open, ...held].sort((a, b) => a.getTime() - b.getTime());
+  }, [s, day, pending?.id, pending?.offered]);
   const usual = client.usualSlots.find((u) => day && u.dow === day.getDay());
   const offered = new Set(pending?.offered ?? []);
   const [pick, setPick] = useState<string | null>(null);
@@ -41,10 +47,14 @@ export default function Booking() {
   const [notifyState, setNotifyState] = useState<string>('');
 
   const [busy, setBusy] = useState(false);
+  const [changing, setChanging] = useState<string | null>(null); // booking id being moved
+  const [cancelling, setCancelling] = useState<string | null>(null);
+  const changingB = changing ? s.bookings.find((b) => b.id === changing) : undefined;
   const confirm = async () => {
     if (!chosen || busy) return;
     setBusy(true);
-    const r = await s.clientAccept(client.id, chosen, pending && sameDay(new Date(pending.start), new Date(chosen)) ? pending.id : undefined);
+    const targetId = changingB ? changingB.id : pending && sameDay(new Date(pending.start), new Date(chosen)) ? pending.id : undefined;
+    const r = await s.clientAccept(client.id, chosen, targetId);
     setBusy(false);
     if (!r.ok) {
       setError(r.reason ?? 'That time is no longer available.');
@@ -53,8 +63,9 @@ export default function Booking() {
     if (note.trim()) s.addClientMessage(client.id, note.trim());
     if (makeUsual) {
       const t = new Date(chosen);
-      s.upsertClient({ ...client, usualSlots: [...client.usualSlots.filter((u) => u.dow !== t.getDay()), { dow: t.getDay(), time: hhmm(t) }] });
+      s.setUsualSlot(client.id, t.getDay(), hhmm(t));
     }
+    setChanging(null);
     setDone(chosen);
     setError('');
     setNote('');
@@ -113,8 +124,14 @@ export default function Booking() {
         </section>
       ) : (
         <>
+          {changingB && (
+            <div className="banner">
+              <span className="grow">Changing <b>{fmtDay(changingB.start)} at {fmtTime(changingB.start)}</b>. Pick a new time below; your old time is released.</span>
+              <button type="button" className="link-btn" onClick={() => setChanging(null)}>Keep it</button>
+            </div>
+          )}
           <div className="stack" style={{ gap: 2 }}>
-            <h1 className="title sm">Book your next session</h1>
+            <h1 className="title sm">{changingB ? 'Pick a new time' : 'Book your next session'}</h1>
             <span className="small muted">{s.settings.sessionMin} min · YMCA · only open times are shown</span>
           </div>
           {bal.hasPackages && (
@@ -229,10 +246,41 @@ export default function Booking() {
       {mine.length > 0 && (
         <section className="card">
           <h2 className="h2">Your upcoming sessions</h2>
-          {mine.map((b) => (
-            <div key={b.id} className="list-row small"><span className="grow">{fmtDay(b.start)}</span><span className="semibold num">{fmtTime(b.start)}</span></div>
-          ))}
+          {mine.map((b) => {
+            const soon = new Date(b.start).getTime() - Date.now() < s.settings.minNoticeH * 3600000;
+            return (
+              <div key={b.id} className="stack tight" style={{ borderTop: '1px solid var(--line)', paddingTop: 10 }}>
+                <div className="row small"><span className="grow">{fmtDay(b.start)}</span><span className="semibold num">{fmtTime(b.start)}</span></div>
+                {cancelling === b.id ? (
+                  <div className="stack tight">
+                    <span className="xs warn-text">{soon ? `Less than ${s.settings.minNoticeH} hours away: this is recorded as a late cancel.` : 'Cancel this session? Your coach is told and the time opens up.'}</span>
+                    <div className="btn-row">
+                      <button type="button" className="btn sm" onClick={() => setCancelling(null)}>Keep it</button>
+                      <button type="button" className="btn sm danger" onClick={() => { s.cancelBooking(b.id, true); setCancelling(null); }}>Cancel session</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="btn-row">
+                    <button
+                      type="button"
+                      className="btn sm"
+                      disabled={soon}
+                      title={soon ? `Less than ${s.settings.minNoticeH} hours away. Message your coach to change it.` : undefined}
+                      onClick={() => { setChanging(b.id); setDone(null); window.scrollTo(0, 0); }}
+                    >
+                      Change time
+                    </button>
+                    <button type="button" className="btn sm danger" onClick={() => setCancelling(b.id)}>Cancel</button>
+                  </div>
+                )}
+                {soon && cancelling !== b.id && <span className="xs muted">Less than {s.settings.minNoticeH} hours away. To change it, add a note for your coach above.</span>}
+              </div>
+            );
+          })}
         </section>
+      )}
+      {isClient && (
+        <button type="button" className="btn ghost" onClick={() => s.signOut()}>Sign out</button>
       )}
     </Page>
   );

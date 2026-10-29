@@ -157,6 +157,7 @@ export function ClientOverview() {
           <Link to="/schedule" className="small semibold">Schedule</Link>
         </div>
         <div className="row between small"><span>Usual slot</span><span className="muted right">{slotsSummary(client)}</span></div>
+        <div className="row between small"><span>Sign-in code</span><span className="semibold num">{client.accessCode ?? client.name.split(' ')[0].toLowerCase()}</span></div>
         <div className="row between small"><span>Flexible window</span><span className="muted right">{client.flexibleWindow || '—'}</span></div>
         <div className="row between small"><span>Contact by</span><span className="muted">{client.pushEnabled ? 'App notification' : 'In the app (notifications off)'}</span></div>
         <div className="row between small"><span>Usual slot handling</span><span className="muted">{client.standing ? 'Standing · auto-confirm' : 'Invite each week'}</span></div>

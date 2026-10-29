@@ -41,16 +41,13 @@ npm run build:demo   # single-file demo in dist-demo/index.html
 
 ## Connected mode
 
-- `src/api.ts` — API client, Supabase email-code sign-in, Web Push subscription
+- `src/api.ts` — API client, code sign-in, Web Push subscription
 - `src/apiActions.ts` — replaces on-device actions with API calls when `VITE_API_URL` is set
+- `src/engine/events.ts` — the same event rules as the API, for the offline demo
 - `public/push-sw.js` — shows notifications pushed by the API
 
-## Offline demo vs production
+## Offline demo vs connected
 
-The demo keeps all data on one device and simulates delivery. For real use with clients:
+Without `VITE_API_URL` the app is a self-contained demo: data stays on one device and the same event rules run in the browser. With it, everything is stored in the Python API (Neon Postgres on Vercel) and shared between the trainer and clients. See the root README for deployment.
 
-1. **Shared backend** (e.g. Supabase/Postgres + auth): trainer and client apps read the same calendar and bookings. Replace the persisted store with API calls.
-2. **App notifications**: Web Push (VAPID) from a small server function; the service worker already exists in the PWA build. iPhone needs iOS 16.4+ and the app added to the Home Screen.
-3. **Text fallback**: Twilio (or similar) for clients without the app installed.
-4. **Calendar sync**: Google Calendar API (read busy times) for the trainer's other jobs.
-5. **AI**: the generator/planner are deterministic rules today; a Claude API call can be added behind the same functions to write session notes and explain plan changes.
+Possible next steps: Google Calendar sync for the trainer's other jobs (busy times), and AI-written session notes and plan explanations behind the same generator/planner functions.

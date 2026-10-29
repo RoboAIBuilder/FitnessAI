@@ -1,14 +1,14 @@
 import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { BellRing, Link2, Lock, SlidersHorizontal, Sparkles } from 'lucide-react';
+import { BellRing, CalendarX2, Link2, Lock, SlidersHorizontal, Sparkles } from 'lucide-react';
 import { slotsFor, useStore } from '../store';
-import { addDays, ampm, DOW_SHORT, fmtDay, fmtTime, fmtTimeShort, sameDay, startOfDay } from '../lib/dates';
+import { addDays, ampm, atTime, DOW_SHORT, fmtDay, fmtTime, fmtTimeShort, hhmm, sameDay, startOfDay } from '../lib/dates';
 import { Avatar, Page, Sheet } from '../ui';
 import type { Booking } from '../types';
 
 type Row =
   | { kind: 'booking'; at: Date; b: Booking }
-  | { kind: 'busy'; at: Date; end: Date; label: string; source: string }
+  | { kind: 'busy'; at: Date; end: Date; label: string; source: string; id: string }
   | { kind: 'open'; at: Date };
 
 const STATUS: Record<string, { label: string; cls: string }> = {
@@ -24,6 +24,7 @@ export default function Schedule() {
   const today = startOfDay(new Date());
   const [sel, setSel] = useState(1);
   const [sheet, setSheet] = useState<Row | null>(null);
+  const [blocking, setBlocking] = useState(false);
   const days = Array.from({ length: 7 }, (_, i) => addDays(today, i));
   const day = days[sel];
 
@@ -32,7 +33,7 @@ export default function Schedule() {
     s.bookings
       .filter((b) => b.clientId && sameDay(new Date(b.start), day) && b.status !== 'cancelled' && b.status !== 'open')
       .forEach((b) => out.push({ kind: 'booking', at: new Date(b.start), b }));
-    s.busy.filter((x) => sameDay(new Date(x.start), day)).forEach((x) => out.push({ kind: 'busy', at: new Date(x.start), end: new Date(x.end), label: x.label, source: x.source }));
+    s.busy.filter((x) => sameDay(new Date(x.start), day)).forEach((x) => out.push({ kind: 'busy', at: new Date(x.start), end: new Date(x.end), label: x.label, source: x.source, id: x.id }));
     slotsFor(s, day).forEach((t) => out.push({ kind: 'open', at: t }));
     return out.sort((a, b) => a.at.getTime() - b.at.getTime());
   }, [s, day]);
@@ -70,10 +71,10 @@ export default function Schedule() {
       <section className="card inverse">
         <div className="row">
           <Sparkles size={18} aria-hidden="true" color="var(--spark)" />
-          <h2 className="h2">Next {s.settings.inviteDaysAhead} days, handled</h2>
+          <h2 className="h2">Next {s.settings.inviteDaysAhead} days</h2>
         </div>
         <span className="small" style={{ lineHeight: 1.45 }}>
-          Invites go out from each client's usual slot and preferences, around your other jobs. {pushCount} clients get app notifications; the rest see updates when they open the app.
+          Tap <b>Plan &amp; remind now</b> to invite clients to their usual times for the next {s.settings.inviteDaysAhead} days and remind upcoming sessions. Bookings, changes and cancellations update the moment they happen. {pushCount} clients get app notifications.
         </span>
         <div className="grid3" style={{ textAlign: 'center' }}>
           <div style={{ background: 'var(--inverse-2)', borderRadius: 10, padding: '8px 4px' }}><div className="display-num" style={{ fontSize: 22, color: '#9fddb5' }}>{confirmed}</div><div className="xs muted">Confirmed</div></div>
@@ -98,6 +99,12 @@ export default function Schedule() {
 
       <div className="row between baseline">
         <h2 className="h2">{fmtDay(day)}</h2>
+        <button type="button" className="btn sm" onClick={() => setBlocking(true)}>
+          <CalendarX2 size={16} aria-hidden="true" /> Block time
+        </button>
+      </div>
+      <div className="row between baseline" style={{ marginTop: -6 }}>
+        <span />
         <span className="xs muted">
           {rows.filter((r) => r.kind === 'booking').length} sessions · {rows.filter((r) => r.kind === 'open').length} open
         </span>
@@ -106,7 +113,16 @@ export default function Schedule() {
       <div className="stack">
         {rows.map((r, i) => {
           if (r.kind === 'busy')
-            return (
+            return r.source === 'Manual' ? (
+              <button key={i} type="button" className="card tight ghost" style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }} onClick={() => setSheet(r)}>
+                <span className="time-col"><b className="muted">{fmtTimeShort(r.at)}</b><span>– {fmtTime(r.end)}</span></span>
+                <span className="grow stack" style={{ gap: 0 }}>
+                  <span className="semibold muted">Unavailable · {r.label}</span>
+                  <span className="xs muted">Blocked by you · tap to remove</span>
+                </span>
+                <CalendarX2 size={16} aria-hidden="true" className="muted" />
+              </button>
+            ) : (
               <div key={i} className="card tight ghost" style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
                 <span className="time-col"><b className="muted">{fmtTimeShort(r.at)}</b><span>– {fmtTime(r.end)}</span></span>
                 <span className="grow stack" style={{ gap: 0 }}>
@@ -141,6 +157,13 @@ export default function Schedule() {
         })}
       </div>
 
+      {blocking && <BlockSheet day={day} onClose={() => setBlocking(false)} />}
+      {sheet?.kind === 'busy' && (
+        <Sheet title={`${sheet.label} · ${fmtTime(sheet.at)}–${fmtTime(sheet.end)}`} eyebrow={fmtDay(sheet.at).toUpperCase()} onClose={() => setSheet(null)}>
+          <span className="small muted">Removing this block opens the time to clients again. The first open slot is offered to the waitlist.</span>
+          <button type="button" className="btn danger block" onClick={async () => { const id = sheet.id; setSheet(null); const msg = await s.unblockTime(id); if (msg) s.toast(msg); }}>Remove block</button>
+        </Sheet>
+      )}
       {sheet?.kind === 'open' && (
         <Sheet title={`Offer ${fmtDay(sheet.at)} · ${fmtTime(sheet.at)}`} eyebrow="OPEN SLOT" onClose={() => setSheet(null)}>
           <span className="small muted">Sends this time to one client. They tap to book it.</span>
@@ -207,6 +230,58 @@ function BookingSheet({ b, onClose, onStart }: { b: Booking; onClose: () => void
           {confirmCancel && <span className="xs muted">The client is told, and the slot is offered to the waitlist.</span>}
         </>
       )}
+    </Sheet>
+  );
+}
+
+function BlockSheet({ day, onClose }: { day: Date; onClose: () => void }) {
+  const s = useStore();
+  const [date, setDate] = useState(`${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`);
+  const win = s.availability[day.getDay()]?.[0];
+  const [from, setFrom] = useState(win?.start ?? '09:00');
+  const [to, setTo] = useState(win ? hhmm(new Date(atTime(day, win.start).getTime() + 3600000)) : '10:00');
+  const [label, setLabel] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const d = new Date(`${date}T12:00`);
+  const start = atTime(d, from);
+  const end = atTime(d, to);
+  const affected = s.bookings.filter((b) => b.clientId && ['confirmed', 'awaiting'].includes(b.status) && new Date(b.start) < end && new Date(new Date(b.start).getTime() + b.durationMin * 60000) > start);
+  return (
+    <Sheet title="Block time" eyebrow="MAKE YOURSELF UNAVAILABLE" onClose={onClose}>
+      <form
+        className="stack loose"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          if (end <= start) {
+            setError('End time must be after start time.');
+            return;
+          }
+          setBusy(true);
+          const msg = await s.blockTime(start.toISOString(), end.toISOString(), label.trim() || 'Unavailable');
+          setBusy(false);
+          onClose();
+          if (msg) s.toast(msg);
+        }}
+      >
+        <div className="field"><label htmlFor="blk-date">Date</label><input id="blk-date" type="date" className="input" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+        <div className="grid2">
+          <div className="field"><label htmlFor="blk-from">From</label><input id="blk-from" type="time" step={900} className="input" value={from} onChange={(e) => setFrom(e.target.value)} /></div>
+          <div className="field"><label htmlFor="blk-to">To</label><input id="blk-to" type="time" step={900} className="input" value={to} onChange={(e) => setTo(e.target.value)} /></div>
+        </div>
+        <div className="field"><label htmlFor="blk-label">Reason (only you see it)</label><input id="blk-label" className="input" value={label} placeholder="e.g. Doctor" onChange={(e) => setLabel(e.target.value)} /></div>
+        {affected.length > 0 ? (
+          <div className="banner warn">
+            <span>
+              {affected.length} booked session{affected.length > 1 ? 's' : ''} in this time ({affected.map((b) => s.clients.find((c) => c.id === b.clientId)?.name.split(' ')[0]).join(', ')}). Each client is offered the two nearest open times right away.
+            </span>
+          </div>
+        ) : (
+          <span className="small muted">No booked sessions in this time.</span>
+        )}
+        {error && <div className="banner warn" role="alert">{error}</div>}
+        <button type="submit" className="btn primary block" disabled={busy}>{busy ? 'Blocking…' : 'Block time'}</button>
+      </form>
     </Sheet>
   );
 }

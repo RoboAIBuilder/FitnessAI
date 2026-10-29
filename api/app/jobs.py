@@ -1,6 +1,7 @@
-"""Hourly job: plan the next few days, send invites and reminders, deliver notifications.
+"""Plan & remind: plan the next few days, send invites and reminders, deliver notifications.
 
-Run on a schedule (e.g. Render Cron Job, every hour):  python -m app.jobs
+Runs when the trainer taps "Plan & remind now" (POST /api/schedule/run). Nothing is scheduled on a timer.
+From a terminal, `python -m app.jobs` does the same for every trainer.
 """
 from __future__ import annotations
 

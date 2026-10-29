@@ -19,7 +19,6 @@ def JN():
 class Trainer(SQLModel, table=True):
     id: str = Field(primary_key=True)
     name: str
-    auth_user_id: Optional[str] = Field(default=None, index=True)
     settings: dict = J(dict)
     availability: dict = J(dict)
 
@@ -28,7 +27,7 @@ class ClientRow(SQLModel, table=True):
     __tablename__ = "client"
     id: str = Field(primary_key=True)
     trainer_id: str = Field(index=True, foreign_key="trainer.id")
-    auth_user_id: Optional[str] = Field(default=None, index=True)  # set when the client signs in
+    access_code: Optional[str] = Field(default=None, index=True)  # the client's sign-in code
     email: Optional[str] = None
     name: str
     age: Optional[int] = None
@@ -158,3 +157,11 @@ class PushSubscriptionRow(SQLModel, table=True):
     p256dh: str
     auth: str
     created_at: str
+
+
+class AppSecret(SQLModel, table=True):
+    """Generated secrets kept in the database (e.g. the session-signing key when SECRET_KEY isn't set)."""
+
+    __tablename__ = "app_secret"
+    key: str = Field(primary_key=True)
+    value: str

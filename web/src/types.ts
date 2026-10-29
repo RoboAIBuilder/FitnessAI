@@ -67,7 +67,8 @@ export interface Client {
   contact: 'push' | 'app' | 'text';
   pushEnabled: boolean;
   phone?: string;
-  email?: string; // used to link the client's sign-in
+  email?: string;
+  accessCode?: string; // sign-in code; defaults to first name, lowercase
   objectives: Objective[];
   constraints: Constraint[];
   notes: string;
@@ -176,7 +177,7 @@ export interface BusyBlock {
   start: string;
   end: string;
   label: string;
-  source: 'Google Calendar' | 'YMCA shifts';
+  source: string; // 'Google Calendar' | 'YMCA shifts' | 'Manual' (blocked in FitnessAI)
 }
 
 export type Availability = Record<number, { start: string; end: string }[]>; // dow -> windows

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Plus, X } from 'lucide-react';
 import { useStore } from '../store';
+import { apiMode } from '../api';
 import { DOW_SHORT, fmtHHMM, minutesOf } from '../lib/dates';
 import { Back, Page, Switch } from '../ui';
 import type { Automation } from '../types';
@@ -136,6 +137,10 @@ export default function Availability() {
         <h2 className="h2">How clients hear from you</h2>
         <span className="small">{push} clients installed the app and get <b>app notifications</b>. The other {s.clients.length - push} see invites and reminders when they open the app, until they turn notifications on.</span>
       </section>
+
+      {apiMode && (
+        <button type="button" className="btn ghost" onClick={() => s.signOut()}>Sign out</button>
+      )}
 
       <section className="card ghost">
         <h2 className="h2">Demo data</h2>

@@ -1,38 +1,38 @@
 # FitnessAI
 
-A phone app for a personal trainer: client profiles, 30-minute circuit sessions (2 circuits × 4 exercises, each done twice), on-the-go modifications that are remembered, session packages (purchased / done / pending), progress toward objectives, next-week plans, and a shared calendar with automatic invites, reminders and a waitlist.
+A phone app for a personal trainer: client profiles, 30-minute circuit sessions (2 circuits × 4 exercises, each done twice), on-the-go modifications that are remembered, session packages (purchased / done / pending), progress toward objectives, next-week plans, and a shared calendar where every booking change is handled the moment it happens.
 
 ```
 fitnessai/
-├── api/   Python backend: FastAPI + SQLModel + Postgres. All the logic lives here.
-└── web/   Installable phone app (React PWA). Screens only when connected to the API;
-           runs fully offline as a demo when no API is configured.
+├── api/   Python backend (FastAPI + SQLModel). All the logic lives here.
+├── web/   Installable phone app (React PWA). Runs as an offline demo when no API is set.
+└── docs/  EVENTS.md — every event and what the app does for it
 ```
 
 ## Tech stack
 
 | Layer | Choice |
 |---|---|
-| API | FastAPI + Pydantic (Python 3.11+) |
-| Logic | `api/app/engine/`: session generator, next-week planner, scheduler, session balance |
-| Database | Postgres (Supabase) in production, SQLite locally; SQLModel tables, Alembic migrations |
-| Sign-in | Supabase Auth (email code); the API verifies the token and limits clients to their own data |
-| Scheduled jobs | `python -m app.jobs` hourly (Render Cron): invites, reminders, notifications |
-| Notifications | Web Push via `pywebpush`; clients without notifications see updates in the app |
-| App | React + TypeScript PWA (Vite), hosted on Vercel |
-| Tests | `pytest` (API + engine, including a parity test against the original TypeScript generator), Vitest (web) |
+| API | FastAPI + Pydantic (Python 3.12+) |
+| Logic | `api/app/engine/`: session generator, next-week planner, scheduler, event handlers, session balance |
+| Database | **Neon Postgres** from Vercel's Storage tab (same as Lost_Found); SQLite locally |
+| Sign-in | Codes: the trainer has `TRAINER_CODE`; each client has their own code (first name, lowercase, by default) |
+| Scheduling | Event-driven (see `docs/EVENTS.md`). No cron: **Plan & remind now** plans and sends reminders when tapped |
+| Notifications | Web Push (optional); otherwise clients see updates in the app |
+| Hosting | Vercel: one project for `web/`, one for `api/` |
+| Tests | `pytest` (26: engine, API, events, sign-in; run against SQLite and Postgres), Vitest (web) |
 
 Not included yet, by choice: text messages and in-app payments.
 
 ## Run locally
 
 ```bash
-# 1. API (http://localhost:8000, docs at /docs)
+# 1. API (http://localhost:8000, docs at /docs) — SQLite, sample data, trainer code "coach"
 cd api
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
-uvicorn app.main:app --reload        # creates fitnessai.db with the sample trainer and clients
-pytest                               # 18 tests
+uvicorn app.main:app --reload
+pytest
 
 # 2. App (http://localhost:5173) in another terminal
 cd web
@@ -41,35 +41,53 @@ echo "VITE_API_URL=http://localhost:8000" > .env.local
 npm run dev
 ```
 
-Local mode needs no sign-in: the app acts as the trainer. To see a client's own view, run this in the browser console and reload: `localStorage.setItem('fitnessai.devClient', 'c-leo')` (remove it to go back).
+Sign in with **coach** (trainer) or a client's first name (**priya**, **daniel**, **marcus**, **elena**, **leo**, **sam**). Without `VITE_API_URL`, `npm run dev` runs the offline demo with the same screens.
 
-Without `VITE_API_URL`, `npm run dev` runs the offline demo with the same screens.
+## Deploy to Vercel
 
-## Deploy
+Two Vercel projects from this one repo, the same way Lost_Found is set up.
 
-1. **Supabase**: create a project. Copy the Postgres connection string, the JWT secret, the project URL and the anon key. Turn on Email sign-in (codes).
-2. **API on Render**: "New → Blueprint" from this repo uses `render.yaml` (API + hourly job). Set `DATABASE_URL` (`postgresql+psycopg://…`), `SUPABASE_JWT_SECRET`, `CORS_ORIGINS` (the Vercel URL), and the VAPID keys from `python -m app.notify --generate-keys`. Migrations run on each deploy.
-3. **App on Vercel**: root directory `web`, build `npm run build`, output `dist`. Environment: `VITE_API_URL` (the Render URL), `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`.
-4. **Link accounts**: set the trainer's Supabase user id in `trainer.auth_user_id` (one SQL update). Clients sign in with the email saved on their profile; the API links them on first sign-in.
+### 1. API project
+1. Vercel → **Add New → Project** → import `RoboAIBuilder/FitnessAI`. Name it e.g. `fitnessai-api`.
+2. **Root Directory:** `api`. Vercel recognises FastAPI (`pyproject.toml` points it to `app.main:app`). No build command.
+3. Deploy once. Then **Storage → Create → Neon (Postgres)** and connect it to this project. It sets `DATABASE_URL`.
+4. **Settings → Environment Variables:**
+   - `TRAINER_CODE`: the trainer's sign-in code
+   - `CORS_ORIGINS`: the web app's address (from step 2 below), e.g. `https://fitnessai-web.vercel.app`
+   - optional `CORS_ORIGIN_REGEX`: `https://fitnessai-web-.*\.vercel\.app` to allow preview deployments
+   - `SEED_DEMO`: `1` to start with the sample clients, `0` to start empty
+   - optional: `SECRET_KEY`, `TRAINER_TZ` (default `America/New_York`), `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` for notifications
+5. Redeploy. Open `https://<api>/api/health`: it should say `"ok": true` with `"database": "postgres"`, or list what's still missing.
+
+Tables are created on first request. For later schema changes, run `alembic upgrade head` with `DATABASE_URL` set to the Neon URL.
+
+### 2. Web project
+1. **Add New → Project** → the same repo. Name it e.g. `fitnessai-web`.
+2. **Root Directory:** `web`. Framework: Vite (build `npm run build`, output `dist`, from `web/vercel.json`).
+3. **Environment Variable:** `VITE_API_URL` = the API project's address, e.g. `https://fitnessai-api.vercel.app`.
+4. Deploy. Put this address into the API's `CORS_ORIGINS` and redeploy the API.
+
+Cost: a demo fits Vercel's and Neon's free plans. Vercel describes Hobby as for personal projects; check whether a paid plan applies once real clients use it.
 
 ## API overview
 
-All writes return the caller's fresh state. Interactive docs at `/docs`.
+All writes return the caller's fresh state. Interactive docs at `/docs`. Events are listed in `docs/EVENTS.md`.
 
 | Method | Path | Who | What |
 |---|---|---|---|
+| POST | `/api/auth/login` | anyone | Sign in with a code → session token |
 | GET | `/api/state` | both | Trainer: everything. Client: only their own data + open times |
-| PUT | `/api/clients/{id}` | trainer | Create/update a client |
+| GET | `/api/health` | anyone | Setup check |
+| PUT | `/api/clients/{id}` | trainer | Create/update a client (incl. sign-in code) |
 | POST/DELETE | `/api/clients/{id}/mods[/{exerciseId}]` | trainer | Save/remove a remembered modification |
-| POST/DELETE | `/api/clients/{id}/packages[/{packageId}]` | trainer | Add/remove purchased sessions |
-| POST | `/api/clients/{id}/measurements` | trainer | Log a weight/time measurement |
-| POST | `/api/programs/generate` | trainer | Draft circuits (limits, saved mods, equipment applied) |
-| PUT | `/api/programs/{clientId}` | trainer | Save a program |
-| POST | `/api/sessions` | trainer | Log a finished session |
+| POST/DELETE | `/api/clients/{id}/packages[/{packageId}]` | trainer | Add (renewal event) / remove purchased sessions |
+| POST | `/api/programs/generate`, PUT `/api/programs/{clientId}` | trainer | Draft / save circuits |
+| POST | `/api/sessions` | trainer | Log a finished session (low-balance event) |
 | POST | `/api/clients/{id}/plan`, `/plan/approve` | trainer | Build / approve next week's plan |
-| POST | `/api/schedule/run` | trainer | Plan the next days, send invites and reminders now |
-| POST | `/api/clients/{id}/book` | both | Book an open time / accept an offer |
-| POST | `/api/bookings/{id}/decline` | both | Decline; the app offers the next open times |
-| POST | `/api/bookings/{id}/offer`, `/skip`, `/cancel` | trainer | Handle requests; cancelled slots go to the waitlist |
-| POST | `/api/clients/{id}/push` | both | Turn app notifications on/off (stores the device subscription) |
-| PUT | `/api/settings`, `/api/availability` | trainer | Hours, booking rules, automation switches |
+| POST | `/api/schedule/run` | trainer | Plan & remind now |
+| POST | `/api/clients/{id}/book` | both | Book / accept an offer / change a confirmed session |
+| POST | `/api/clients/{id}/usual-slot` | both | Make a time the client's usual slot |
+| POST | `/api/bookings/{id}/decline`, `/cancel` | both | Decline (new times offered) / cancel (waitlist offered) |
+| POST | `/api/bookings/{id}/offer`, `/skip`, `/missed` | trainer | Handle requests |
+| POST/DELETE | `/api/busy[/{id}]` | trainer | Block / unblock time (affected clients moved) |
+| PUT | `/api/availability`, `/api/settings` | trainer | Weekly hours (affected clients moved), booking rules |

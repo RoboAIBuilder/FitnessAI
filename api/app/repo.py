@@ -15,17 +15,78 @@ from .models import (
 )
 from .schemas import Booking, BusyBlock, Client, Message, Program, SessionLog, Settings, State, Window, WeekPlan
 
-_connect_args = {"check_same_thread": False} if config.database_url.startswith("sqlite") else {}
-engine = create_engine(config.database_url, connect_args=_connect_args)
+if config.database_url.startswith("sqlite"):
+    engine = create_engine(config.database_url, connect_args={"check_same_thread": False})
+else:
+    # Neon (Postgres). On Vercel each function instance is short-lived, so don't hold a pool;
+    # prepare_threshold=None keeps psycopg compatible with Neon's pooled (PgBouncer) endpoint.
+    from sqlalchemy.pool import NullPool
+
+    engine = create_engine(
+        config.database_url,
+        connect_args={"prepare_threshold": None},
+        pool_pre_ping=True,
+        **({"poolclass": NullPool} if config.on_vercel else {}),
+    )
+
+_ready = False
 
 
 def create_tables() -> None:
     SQLModel.metadata.create_all(engine)
 
 
+def ensure_ready() -> None:
+    """Create tables (and the demo data, if SEED_DEMO=1) on first use. Runs once per server instance."""
+    global _ready
+    if _ready:
+        return
+    create_tables()
+    if config.seed_demo:
+        from .seed import build_seed
+
+        with Session(engine) as s:
+            if s.exec(select(Trainer)).first() is None:
+                seed_trainer(s, build_seed(utcnow(), config.default_timezone))
+    _ready = True
+
+
 def get_session():
+    ensure_ready()
     with Session(engine) as s:
         yield s
+
+
+def app_secret(session: Session, key: str, make) -> str:
+    """Read a generated secret from the database, creating it on first use."""
+    from .models import AppSecret
+
+    row = session.get(AppSecret, key)
+    if row is None:
+        row = AppSecret(key=key, value=make())
+        session.add(row)
+        session.commit()
+    return row.value
+
+
+def code_from_name(name: str) -> str:
+    first = (name.strip().split(" ")[0] if name.strip() else "client").lower()
+    return "".join(ch for ch in first if ch.isalnum()) or "client"
+
+
+def unique_code(session: Session, trainer_id: str, wanted: str, client_id: str) -> str:
+    """Sign-in codes must be unique: Priya → "priya", a second Priya → "priya2"."""
+    taken = {
+        (c.access_code or "").lower()
+        for c in session.exec(select(ClientRow).where(ClientRow.trainer_id == trainer_id)).all()
+        if c.id != client_id
+    }
+    taken.add((config.trainer_code or "coach").lower())
+    base = wanted.lower().strip() or "client"
+    code, n = base, 2
+    while code in taken:
+        code, n = f"{base}{n}", n + 1
+    return code
 
 
 def _dump(obj) -> dict:
@@ -49,6 +110,7 @@ def _upsert(session: Session, table, data: dict) -> None:
 
 # ---------- writes ----------
 def save_client(session: Session, trainer_id: str, c: Client) -> None:
+    c.access_code = unique_code(session, trainer_id, c.access_code or code_from_name(c.name), c.id)
     data = _dump(c)
     packages = data.pop("packages", [])
     _upsert(session, ClientRow, {**data, "trainer_id": trainer_id})

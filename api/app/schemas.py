@@ -95,6 +95,7 @@ class Client(Domain):
     push_enabled: bool = False
     phone: Optional[str] = None
     email: Optional[str] = None
+    access_code: Optional[str] = None  # sign-in code; defaults to first name, lowercase
     objectives: list[Objective] = []
     constraints: list[Constraint] = []
     notes: str = ""

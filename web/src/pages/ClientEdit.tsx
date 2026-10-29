@@ -171,7 +171,8 @@ export default function ClientEdit() {
         ))}
         <Switch on={c.standing} onToggle={() => set('standing', !c.standing)} title="Standing slot" sub="Auto-confirm every week unless the client changes it" />
         <div className="field"><label htmlFor="f-flex">Flexible window</label><input id="f-flex" className="input" value={c.flexibleWindow} placeholder="e.g. Weekdays 6–9 AM" onChange={(e) => set('flexibleWindow', e.target.value)} /></div>
-        <div className="field"><label htmlFor="f-email">Email (client signs in to the app with it)</label><input id="f-email" className="input" type="email" inputMode="email" autoComplete="off" value={c.email ?? ''} onChange={(e) => set('email', e.target.value.trim().toLowerCase() || undefined)} /></div>
+        <div className="field"><label htmlFor="f-code">Sign-in code</label><input id="f-code" className="input" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={c.accessCode ?? ''} placeholder={(c.name.trim().split(' ')[0] || 'firstname').toLowerCase()} onChange={(e) => set('accessCode', e.target.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '') || undefined)} /><span className="xs muted">The client enters this to open their booking page. Leave empty to use their first name.</span></div>
+        <div className="field"><label htmlFor="f-email">Email (optional)</label><input id="f-email" className="input" type="email" inputMode="email" autoComplete="off" value={c.email ?? ''} onChange={(e) => set('email', e.target.value.trim().toLowerCase() || undefined)} /></div>
       </section>
       <button type="button" className="btn primary block" onClick={save}>Save client</button>
     </Page>
